@@ -203,10 +203,11 @@ def engineer_features(df):
         features.append(slope / (close + 1e-12))
         feature_names.append(f'BETA{w}')
         
-        # R-squared can be calculated as CORREL^2
-        time_period_series = pd.Series(range(w), index=close.index[:w])
-        rolling_corr = close.rolling(w).corr(time_period_series)
-        rsquare = rolling_corr**2
+        # R-squared = CORREL(x, y)^2 over rolling window
+        # x = numeric index (0,1,...,len-1), y = close price
+        idx_numeric = pd.Series(np.arange(len(close), dtype=float), index=close.index)
+        rolling_corr = close.rolling(w).corr(idx_numeric)
+        rsquare = rolling_corr ** 2
         features.append(rsquare)
         feature_names.append(f'RSQR{w}')
 

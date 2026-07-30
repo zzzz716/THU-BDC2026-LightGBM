@@ -1,9 +1,0 @@
-{
-  "best_iter": 77,
-  "seed": 42,
-  "objective": "lambdarank",
-  "n_jobs": 1,
-  "deterministic": true,
-  "holdout_wr": 0.11897250131471004,
-  "holdout_comp": 0.6411216239763223
-}
