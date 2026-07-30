@@ -1,19 +1,9 @@
 {
-  "best_iter": 4850,
-  "val_wr": 0.011026,
-  "val_comp": 0.037441,
-  "params": {
-    "objective": "regression",
-    "metric": "mse",
-    "boosting_type": "gbdt",
-    "num_leaves": 63,
-    "learning_rate": 0.05,
-    "feature_fraction": 0.8,
-    "bagging_fraction": 0.8,
-    "bagging_freq": 5,
-    "min_child_samples": 20,
-    "lambda_l1": 0.1,
-    "lambda_l2": 1.0,
-    "seed": 9999
-  }
+  "best_iter": 77,
+  "seed": 42,
+  "objective": "lambdarank",
+  "n_jobs": 1,
+  "deterministic": true,
+  "holdout_wr": 0.11897250131471004,
+  "holdout_comp": 0.6411216239763223
 }

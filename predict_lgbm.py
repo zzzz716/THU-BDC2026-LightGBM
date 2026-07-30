@@ -1,6 +1,10 @@
 """
-LightGBM prediction script for THU-BDC2026.
-Loads model and predicts top 5 stocks on the latest date.
+LightGBM prediction for THU-BDC2026.
+Loads trained model and predicts top-5 stocks on the latest date.
+
+Fixes:
+  - Strict feature validation: raises on ANY mismatch
+  - Deterministic: same features, same order as training
 """
 
 import pandas as pd
@@ -15,14 +19,17 @@ from utils import engineer_features_158plus39
 def main():
     data_path = './data/train.csv'
     model_path = './model/lgbm/best.txt'
+    features_path = './model/lgbm/feature_cols.json'
     output_path = './output/result.csv'
     os.makedirs('./output', exist_ok=True)
 
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model not found: {model_path}")
+    if not os.path.exists(features_path):
+        raise FileNotFoundError(f"Feature list not found: {features_path}")
 
-    # Load feature cols
-    with open('./model/lgbm/feature_cols.json', 'r') as f:
+    # Load expected features
+    with open(features_path, 'r') as f:
         feature_cols = json.load(f)
 
     # Load and prepare data
@@ -33,20 +40,28 @@ def main():
     groups = [engineer_features_158plus39(g) for _, g in df.groupby('股票代码')]
     df = pd.concat(groups).reset_index(drop=True)
 
-    # Add cross-sectional rank features
+    # Cross-sectional rank features (same as training — computed on full pool)
     for col in ['return_1', 'return_5', 'return_10', 'rsi', 'macd', 'volume_ratio', 'volatility_20']:
         rcol = f'{col}_rank'
         if col in df.columns and rcol in feature_cols:
             df[rcol] = df.groupby('日期')[col].rank(pct=True)
 
-    # Load model
-    model = lgb.Booster(model_file=model_path)
-
-    # Predict on latest date
+    # ── Strict feature validation ──
     latest = df[df['日期'] == df['日期'].max()].copy()
-    avail = [c for c in feature_cols if c in latest.columns]
-    X = np.nan_to_num(latest[avail].values, nan=0, posinf=0, neginf=0)
+    missing_features = [c for c in feature_cols if c not in latest.columns]
+    if missing_features:
+        raise ValueError(
+            f"Prediction data is missing {len(missing_features)} features "
+            f"that were used during training: {missing_features[:10]}..."
+        )
 
+    # Build feature matrix in exact same order as training
+    X = latest[feature_cols].values  # use feature_cols order, not DataFrame column order
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Predict
+    model = lgb.Booster(model_file=model_path)
+    latest = latest.copy()
     latest['pred'] = model.predict(X)
     top = latest.nlargest(5, 'pred')
 
