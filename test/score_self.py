@@ -43,6 +43,8 @@ def calculate_return(group):
 def calculate_predict_weight_score(output_data, test_data):
     # 选择输出指定的5个股票
     test_data = test_data[test_data['股票代码'].isin(output_data['股票代码'])]
+    # 按日期排序，确保tail(5)取到正确的最近5天
+    test_data = test_data.sort_values(['股票代码', '日期'])
     # 只选最后五个记录
     test_data = test_data.groupby('股票代码').tail(5)
     # 分别计算收益率

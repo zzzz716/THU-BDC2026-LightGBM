@@ -1,12 +1,15 @@
 """
-LightGBM training for THU-BDC2026 v4.
+LightGBM training for THU-BDC2026 v5.
 
-Fixes in this version:
-  1. Purge gap between CV and holdout (not just between train/val folds)
-  2. RSQR feature fixed in utils.py (rolling correlation on full-length index)
-  3. Relevance: 20-bin fine-grained instead of 5-bin coarse
-  4. Two-phase: evaluate on clean holdout, then retrain on ALL data for submission
-  5. Old stale files cleaned automatically
+All fixes applied:
+  1. Top5 explicit labels: rank1→5, rank2→4, ..., rank5→1, rest→0
+  2. Iteration: median of CV folds (not mean) for robustness
+  3. Multi-month holdout evaluation (2 non-overlapping months)
+  4. CV-Holdout purge gap enforced
+  5. Data sorted by (日期, 股票代码) for correct LambdaRank grouping
+  6. RSQR fixed in utils.py
+  7. Dead code removed from utils.py
+  8. score_self.py sorts by date
 """
 
 import pandas as pd
@@ -23,11 +26,10 @@ MODEL_DIR = './model/lgbm'
 SEED = 42
 TOP_K = 5
 PURGE_DAYS = 5
-N_BINS = 20  # fine-grained relevance bins
 
 
 # ─────────────────────────────────────────────────────
-# 1. Data loading & feature engineering
+# 1. Data loading
 # ─────────────────────────────────────────────────────
 def load_and_engineer(csv_path):
     df = pd.read_csv(csv_path, dtype={'股票代码': str})
@@ -51,11 +53,17 @@ def load_and_engineer(csv_path):
     df = df.dropna(subset=['label'])
     df = df[df['open_t1'] > 1e-4]
 
-    # Fine-grained relevance: 20 bins per day
-    # ~15 stocks per bin (300/20), top bin = 19, bottom = 0
-    df['relevance'] = df.groupby('日期')['label'].transform(
-        lambda x: pd.cut(x, bins=N_BINS, labels=False, duplicates='drop')
-    ).fillna(0).astype(int)
+    # ── Top5 explicit relevance ──
+    # rank1 (best return) → 5, rank2 → 4, ..., rank5 → 1, rest → 0
+    # This explicitly tells LambdaRank which stocks are Top5 and their internal order
+    df['relevance'] = 0
+    for date, grp in df.groupby('日期'):
+        if len(grp) < TOP_K:
+            continue
+        top_idx = grp['label'].nlargest(TOP_K).index
+        # Assign 5,4,3,2,1 to the top 5 stocks
+        for rank_val, idx in enumerate(top_idx):
+            df.loc[idx, 'relevance'] = TOP_K - rank_val  # 5,4,3,2,1
 
     # CRITICAL: sort by (日期, 股票代码) for LambdaRank grouping
     df = df.sort_values(['日期', '股票代码']).reset_index(drop=True)
@@ -95,26 +103,25 @@ def eval_competition(preds, labels, dates, top_k=5):
 
 
 # ─────────────────────────────────────────────────────
-# 3. Purge-aware time-series splits
+# 3. Purge-aware splits
 # ─────────────────────────────────────────────────────
-def purge_split(df, n_folds=3, holdout_months=1):
-    """Time-series splits with PURGE_DAYS gap everywhere:
-      - Between each train/val fold
-      - Between CV data and holdout
+def purge_split(df, n_folds=3, holdout_months=2):
+    """Time-series splits with purge gaps:
+    - Between each train/val fold: PURGE_DAYS
+    - Between CV and holdout: PURGE_DAYS
+    - holdout_months=2 for more stable evaluation
     """
     dates = sorted(df['日期'].unique())
-    n_dates = len(dates)
 
-    # Holdout boundary: last holdout_months, with purge gap before it
+    # Holdout: last 2 months
     holdout_start = df['日期'].max() - pd.DateOffset(months=holdout_months)
     ho_dates = sorted([d for d in dates if d >= holdout_start])
-    cv_dates = sorted([d for d in dates if d < holdout_start])
+    cv_dates_all = sorted([d for d in dates if d < holdout_start])
 
-    # Remove last PURGE_DAYS from cv_dates to create gap before holdout
-    cv_dates_clean = cv_dates[:-PURGE_DAYS] if len(cv_dates) > PURGE_DAYS else cv_dates
+    # Purge gap before holdout
+    cv_dates = cv_dates_all[:-PURGE_DAYS] if len(cv_dates_all) > PURGE_DAYS else cv_dates_all
 
-    n_cv = len(cv_dates_clean)
-    # Each fold needs: train + purge_gap + val
+    n_cv = len(cv_dates)
     fold_size = (n_cv - PURGE_DAYS * n_folds) // (n_folds + 1)
 
     folds = []
@@ -122,12 +129,11 @@ def purge_split(df, n_folds=3, holdout_months=1):
         train_end = fold_size * (i + 1)
         gap_end = train_end + PURGE_DAYS
         val_end = gap_end + fold_size
-
-        train_d = set(cv_dates_clean[:train_end])
-        val_d = set(cv_dates_clean[gap_end:min(val_end, n_cv)])
+        train_d = set(cv_dates[:train_end])
+        val_d = set(cv_dates[gap_end:min(val_end, n_cv)])
         folds.append((train_d, val_d))
 
-    return folds, ho_dates, cv_dates_clean
+    return folds, ho_dates, cv_dates
 
 
 def get_groups(dates):
@@ -175,6 +181,11 @@ def train_fold(X_tr, y_tr, tr_dates, X_v, y_v, v_dates, n_rounds=3000):
     return model
 
 
+def train_model(X, y, dates, n_rounds):
+    dtrain = lgb.Dataset(X, label=y, group=get_groups(dates))
+    return lgb.train(BASE_PARAMS, dtrain, num_boost_round=n_rounds)
+
+
 # ─────────────────────────────────────────────────────
 # 5. Predict
 # ─────────────────────────────────────────────────────
@@ -185,7 +196,6 @@ def predict_top5(model, feature_cols, top_k=5):
     df = df.sort_values(['股票代码', '日期']).reset_index(drop=True)
     groups = [engineer_features_158plus39(g) for _, g in df.groupby('股票代码')]
     df = pd.concat(groups).reset_index(drop=True)
-
     for col in ['return_1', 'return_5', 'return_10', 'rsi', 'macd',
                 'volume_ratio', 'volatility_20']:
         rcol = f'{col}_rank'
@@ -196,16 +206,11 @@ def predict_top5(model, feature_cols, top_k=5):
     missing = [c for c in feature_cols if c not in latest.columns]
     if missing:
         raise ValueError(f"Missing features: {missing}")
-
     X = np.nan_to_num(latest[feature_cols].values, nan=0.0, posinf=0.0, neginf=0.0)
     latest = latest.copy()
     latest['pred'] = model.predict(X)
     top = latest.nlargest(top_k, 'pred')
-
-    result = pd.DataFrame({
-        'stock_id': top['股票代码'].values,
-        'weight': [1.0 / top_k] * top_k
-    })
+    result = pd.DataFrame({'stock_id': top['股票代码'].values, 'weight': [1.0 / top_k] * top_k})
     os.makedirs('./output', exist_ok=True)
     result.to_csv('./output/result.csv', index=False)
     print(f"  Prediction date: {latest['日期'].max().date()}")
@@ -214,48 +219,44 @@ def predict_top5(model, feature_cols, top_k=5):
 
 
 # ─────────────────────────────────────────────────────
-# 6. Cleanup
-# ─────────────────────────────────────────────────────
-def clean_old_files():
-    for f in glob.glob(os.path.join(MODEL_DIR, 'train_info.json')):
-        os.remove(f)
-        print(f"  Removed stale: {f}")
-    for f in glob.glob(os.path.join(MODEL_DIR, 'search*.json')):
-        os.remove(f)
-        print(f"  Removed stale: {f}")
-
-
-# ─────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────
 if __name__ == '__main__':
     print("=" * 60)
-    print("LightGBM v4 — All fixes applied")
+    print("LightGBM v5 — Top5 labels + median iter + multi-month holdout")
     print("=" * 60)
 
-    clean_old_files()
+    # Clean stale files
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    for pat in ['train_info.json', 'search*.json', 'final_search.json']:
+        for f in glob.glob(os.path.join(MODEL_DIR, pat)):
+            os.remove(f)
+            print(f"  Cleaned: {f}")
 
     df, feature_cols = load_and_engineer(DATA_PATH)
     print(f"  Features: {len(feature_cols)}, Rows: {len(df)}")
     print(f"  Sorted by (日期, 股票代码): {df['日期'].is_monotonic_increasing}")
-    print(f"  Relevance bins: {N_BINS}")
 
-    # Verify RSQR has real values (not all zeros)
-    rsqr_cols = [c for c in feature_cols if c.startswith('RSQR')]
-    for c in rsqr_cols:
-        nonzero = (df[c] != 0).sum()
-        total = len(df)
-        print(f"  {c}: {nonzero}/{total} nonzero ({100*nonzero/total:.1f}%)")
+    # Verify RSQR
+    for c in [c for c in feature_cols if c.startswith('RSQR')]:
+        nz = (df[c] != 0).sum()
+        print(f"  {c}: {nz}/{len(df)} nonzero ({100*nz/len(df):.1f}%)")
+
+    # Verify relevance distribution
+    rel = df['relevance']
+    print(f"\n  Relevance distribution:")
+    for v in range(6):
+        cnt = (rel == v).sum()
+        print(f"    grade {v}: {cnt} ({100*cnt/len(rel):.2f}%)")
 
     # ── Purge CV ──
-    folds, ho_dates, cv_dates_clean = purge_split(df, n_folds=3, holdout_months=1)
+    folds, ho_dates, cv_dates = purge_split(df, n_folds=3, holdout_months=2)
     holdout_df = df[df['日期'].isin(ho_dates)].copy()
-    cv_df = df[df['日期'].isin(cv_dates_clean)].copy()
+    cv_df = df[df['日期'].isin(cv_dates)].copy()
 
-    print(f"\n── Purge CV (3 folds, gap={PURGE_DAYS} days) ──")
-    print(f"  CV: {cv_df['日期'].min().date()} ~ {cv_df['日期'].max().date()}")
-    print(f"  Gap: {PURGE_DAYS} trading days")
-    print(f"  Holdout: {holdout_df['日期'].min().date()} ~ {holdout_df['日期'].max().date()}")
+    print(f"\n── Purge CV (3 folds, purge={PURGE_DAYS}d) ──")
+    print(f"  CV:   {cv_df['日期'].min().date()} ~ {cv_df['日期'].max().date()}")
+    print(f"  Hold: {holdout_df['日期'].min().date()} ~ {holdout_df['日期'].max().date()}")
 
     cv_results = []
     for i, (train_dates, val_dates) in enumerate(folds):
@@ -280,52 +281,48 @@ if __name__ == '__main__':
         cv_results.append({'fold': i, 'wr': m['wr'], 'comp': m['comp'],
                            'best_iter': model.best_iteration})
 
-    avg_iter = int(np.mean([r['best_iter'] for r in cv_results]))
+    # Use MEDIAN iteration for robustness
+    all_iters = [r['best_iter'] for r in cv_results]
+    final_iter = int(np.median(all_iters))
     avg_wr = np.mean([r['wr'] for r in cv_results])
     avg_comp = np.mean([r['comp'] for r in cv_results])
-    print(f"\n  CV avg: WR={avg_wr:.6f} Comp={avg_comp:.6f} avg_iter={avg_iter}")
+    print(f"\n  CV avg: WR={avg_wr:.6f} Comp={avg_comp:.6f}")
+    print(f"  Iterations: {all_iters} → median={final_iter}")
 
-    # ── Holdout evaluation (clean, never seen) ──
+    # ── Holdout evaluation (clean) ──
     print(f"\n── Holdout evaluation ──")
-    X_cv = np.nan_to_num(cv_df[feature_cols].values, nan=0, posinf=0, neginf=0)
-    y_cv = cv_df['relevance'].values
-    dtrain_cv = lgb.Dataset(X_cv, label=y_cv, group=get_groups(cv_df['日期'].values))
-    eval_model = lgb.train(BASE_PARAMS, dtrain_cv, num_boost_round=avg_iter)
-
+    eval_model = train_model(
+        np.nan_to_num(cv_df[feature_cols].values, nan=0, posinf=0, neginf=0),
+        cv_df['relevance'].values, cv_df['日期'].values, final_iter
+    )
     X_ho = np.nan_to_num(holdout_df[feature_cols].values, nan=0, posinf=0, neginf=0)
     ho_preds = eval_model.predict(X_ho)
     ho_wr, ho_m = eval_competition(ho_preds, holdout_df['label'].values,
                                     holdout_df['日期'].values)
-    print(f"  Holdout (unseen): WR={ho_m['wr']:.6f} Comp={ho_m['comp']:.6f}")
+    print(f"  Holdout: WR={ho_m['wr']:.6f} Comp={ho_m['comp']:.6f}")
 
     # ── Retrain on ALL data for submission ──
-    print(f"\n── Retrain on ALL data ({avg_iter} rounds) ──")
+    print(f"\n── Retrain on ALL data ({final_iter} rounds) ──")
     X_all = np.nan_to_num(df[feature_cols].values, nan=0, posinf=0, neginf=0)
-    y_all = df['relevance'].values
-    dtrain_all = lgb.Dataset(X_all, label=y_all, group=get_groups(df['日期'].values))
-    final_model = lgb.train(BASE_PARAMS, dtrain_all, num_boost_round=avg_iter)
+    final_model = train_model(X_all, df['relevance'].values, df['日期'].values, final_iter)
 
     # ── Save ──
-    os.makedirs(MODEL_DIR, exist_ok=True)
     final_model.save_model(os.path.join(MODEL_DIR, 'best.txt'))
     with open(os.path.join(MODEL_DIR, 'feature_cols.json'), 'w') as f:
         json.dump(feature_cols, f)
     report = {
-        'version': 'v4',
-        'seed': SEED,
-        'objective': 'lambdarank',
-        'n_jobs': 1,
-        'deterministic': True,
+        'version': 'v5',
+        'seed': SEED, 'objective': 'lambdarank',
+        'n_jobs': 1, 'deterministic': True,
         'purge_days': PURGE_DAYS,
-        'n_bins': N_BINS,
-        'rsqr_fixed': True,
+        'relevance': 'top5=5/4/3/2/1 rest=0',
+        'iter_selection': 'median',
+        'holdout_months': 2,
         'cv_results': cv_results,
-        'cv_avg_wr': float(avg_wr),
-        'cv_avg_comp': float(avg_comp),
-        'holdout_wr': float(ho_m['wr']),
-        'holdout_comp': float(ho_m['comp']),
-        'final_iter': avg_iter,
-        'final_model_trained_on': 'all_data_including_holdout',
+        'cv_avg_wr': float(avg_wr), 'cv_avg_comp': float(avg_comp),
+        'holdout_wr': float(ho_m['wr']), 'holdout_comp': float(ho_m['comp']),
+        'final_iter': final_iter,
+        'final_model_trained_on': 'all_data',
     }
     with open(os.path.join(MODEL_DIR, 'train_report.json'), 'w') as f:
         json.dump(report, f, indent=2)

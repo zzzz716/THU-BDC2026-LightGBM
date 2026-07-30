@@ -1,36 +1,37 @@
 {
-  "version": "v4",
+  "version": "v5",
   "seed": 42,
   "objective": "lambdarank",
   "n_jobs": 1,
   "deterministic": true,
   "purge_days": 5,
-  "n_bins": 20,
-  "rsqr_fixed": true,
+  "relevance": "top5=5/4/3/2/1 rest=0",
+  "iter_selection": "median",
+  "holdout_months": 2,
   "cv_results": [
     {
       "fold": 0,
-      "wr": 0.008618062415885357,
-      "comp": 0.021921106701175308,
-      "best_iter": 47
+      "wr": 0.006140112736292584,
+      "comp": -0.012013820636323643,
+      "best_iter": 51
     },
     {
       "fold": 1,
-      "wr": 0.009502831058801177,
-      "comp": 0.033438674057555594,
-      "best_iter": 30
+      "wr": 0.002135516118194592,
+      "comp": 0.010851080313616111,
+      "best_iter": 14
     },
     {
       "fold": 2,
-      "wr": 0.011893690023043786,
-      "comp": 0.033724130596179784,
+      "wr": 0.015165793257305764,
+      "comp": 0.04899670853507802,
       "best_iter": 1
     }
   ],
-  "cv_avg_wr": 0.010004861165910107,
-  "cv_avg_comp": 0.02969463711830356,
-  "holdout_wr": 0.03914382800194016,
-  "holdout_comp": 0.2107816025983917,
-  "final_iter": 26,
-  "final_model_trained_on": "all_data_including_holdout"
+  "cv_avg_wr": 0.007813807370597647,
+  "cv_avg_comp": 0.015944656070790163,
+  "holdout_wr": 0.010045561243095536,
+  "holdout_comp": 0.03252358135528425,
+  "final_iter": 14,
+  "final_model_trained_on": "all_data"
 }
