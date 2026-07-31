@@ -53,17 +53,15 @@ def load_and_engineer(csv_path):
     df = df.dropna(subset=['label'])
     df = df[df['open_t1'] > 1e-4]
 
-    # ── Top5 explicit relevance ──
-    # rank1 (best return) → 5, rank2 → 4, ..., rank5 → 1, rest → 0
-    # This explicitly tells LambdaRank which stocks are Top5 and their internal order
+    # ── Fine-grained relevance: 20 bins per day ──
+    # ~15 stocks per bin, top bin captures rank 1-15, gives richer gradient signal
     df['relevance'] = 0
     for date, grp in df.groupby('日期'):
-        if len(grp) < TOP_K:
+        if len(grp) < 10:
             continue
-        top_idx = grp['label'].nlargest(TOP_K).index
-        # Assign 5,4,3,2,1 to the top 5 stocks
-        for rank_val, idx in enumerate(top_idx):
-            df.loc[idx, 'relevance'] = TOP_K - rank_val  # 5,4,3,2,1
+        # Bin into 20 groups by return rank
+        bins = pd.qcut(grp['label'], q=20, labels=False, duplicates='drop')
+        df.loc[grp.index, 'relevance'] = bins.fillna(0).astype(int)
 
     # CRITICAL: sort by (日期, 股票代码) for LambdaRank grouping
     df = df.sort_values(['日期', '股票代码']).reset_index(drop=True)
@@ -174,7 +172,7 @@ def train_fold(X_tr, y_tr, tr_dates, X_v, y_v, v_dates, n_rounds=3000):
         valid_sets=[dval],
         valid_names=['val'],
         callbacks=[
-            lgb.early_stopping(stopping_rounds=200),
+            lgb.early_stopping(stopping_rounds=300),
             lgb.log_evaluation(500),
         ]
     )
@@ -315,7 +313,7 @@ if __name__ == '__main__':
         'seed': SEED, 'objective': 'lambdarank',
         'n_jobs': 1, 'deterministic': True,
         'purge_days': PURGE_DAYS,
-        'relevance': 'top5=5/4/3/2/1 rest=0',
+        'relevance': '20-bin qcut per day',
         'iter_selection': 'median',
         'holdout_months': 2,
         'cv_results': cv_results,

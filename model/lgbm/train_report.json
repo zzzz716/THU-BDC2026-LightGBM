@@ -5,33 +5,33 @@
   "n_jobs": 1,
   "deterministic": true,
   "purge_days": 5,
-  "relevance": "top5=5/4/3/2/1 rest=0",
+  "relevance": "20-bin qcut per day",
   "iter_selection": "median",
   "holdout_months": 2,
   "cv_results": [
     {
       "fold": 0,
-      "wr": 0.006140112736292584,
-      "comp": -0.012013820636323643,
-      "best_iter": 51
+      "wr": 0.014238077522054119,
+      "comp": 0.03954933897116922,
+      "best_iter": 11
     },
     {
       "fold": 1,
-      "wr": 0.002135516118194592,
-      "comp": 0.010851080313616111,
-      "best_iter": 14
+      "wr": 0.011278073524523024,
+      "comp": 0.06428132343305666,
+      "best_iter": 44
     },
     {
       "fold": 2,
-      "wr": 0.015165793257305764,
-      "comp": 0.04899670853507802,
-      "best_iter": 1
+      "wr": 0.01990829124709171,
+      "comp": 0.0762989524966473,
+      "best_iter": 59
     }
   ],
-  "cv_avg_wr": 0.007813807370597647,
-  "cv_avg_comp": 0.015944656070790163,
-  "holdout_wr": 0.010045561243095536,
-  "holdout_comp": 0.03252358135528425,
-  "final_iter": 14,
+  "cv_avg_wr": 0.015141480764556283,
+  "cv_avg_comp": 0.060043204966957725,
+  "holdout_wr": -0.006028455914881634,
+  "holdout_comp": -0.048076553481927214,
+  "final_iter": 44,
   "final_model_trained_on": "all_data"
 }
