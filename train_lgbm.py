@@ -53,22 +53,27 @@ def load_and_engineer(csv_path):
     df = df.dropna(subset=['label'])
     df = df[df['open_t1'] > 1e-4]
 
-    # ── Fine-grained relevance: 20 bins per day ──
-    # ~15 stocks per bin, top bin captures rank 1-15, gives richer gradient signal
+    # ── Top5-focused relevance: only Top5 get positive grades ──
+    # Grade 4=best, 3, 2, 1, 0 for rank 1-5. All others = 0.
+    # sample_weight compensates for class imbalance (only ~1.7% positive)
     df['relevance'] = 0
+    df['sample_weight'] = 1.0
     for date, grp in df.groupby('日期'):
-        if len(grp) < 10:
+        if len(grp) < TOP_K:
             continue
-        # Bin into 20 groups by return rank
-        bins = pd.qcut(grp['label'], q=20, labels=False, duplicates='drop')
-        df.loc[grp.index, 'relevance'] = bins.fillna(0).astype(int)
+        top_idx = grp['label'].nlargest(TOP_K).index
+        for rank_val, idx in enumerate(top_idx):
+            df.loc[idx, 'relevance'] = TOP_K - rank_val  # 5,4,3,2,1
+        # Boost positive samples so model gets enough gradient
+        n_stocks = len(grp)
+        df.loc[top_idx, 'sample_weight'] = n_stocks / TOP_K  # ~60x weight
 
     # CRITICAL: sort by (日期, 股票代码) for LambdaRank grouping
     df = df.sort_values(['日期', '股票代码']).reset_index(drop=True)
 
     meta = {'股票代码', '日期', '开盘', '收盘', '最高', '最低',
             '成交量', '成交额', '振幅', '涨跌额', '换手率', '涨跌幅',
-            'label', 'open_t1', 'open_t5', 'relevance'}
+            'label', 'open_t1', 'open_t5', 'relevance', 'sample_weight'}
     feature_cols = [c for c in df.columns if c not in meta]
     return df, feature_cols
 
@@ -163,9 +168,9 @@ BASE_PARAMS = {
 }
 
 
-def train_fold(X_tr, y_tr, tr_dates, X_v, y_v, v_dates, n_rounds=3000):
-    dtrain = lgb.Dataset(X_tr, label=y_tr, group=get_groups(tr_dates))
-    dval = lgb.Dataset(X_v, label=y_v, group=get_groups(v_dates), reference=dtrain)
+def train_fold(X_tr, y_tr, tr_dates, X_v, y_v, v_dates, w_tr=None, w_v=None, n_rounds=3000):
+    dtrain = lgb.Dataset(X_tr, label=y_tr, weight=w_tr, group=get_groups(tr_dates))
+    dval = lgb.Dataset(X_v, label=y_v, weight=w_v, group=get_groups(v_dates), reference=dtrain)
     model = lgb.train(
         BASE_PARAMS, dtrain,
         num_boost_round=n_rounds,
@@ -179,8 +184,8 @@ def train_fold(X_tr, y_tr, tr_dates, X_v, y_v, v_dates, n_rounds=3000):
     return model
 
 
-def train_model(X, y, dates, n_rounds):
-    dtrain = lgb.Dataset(X, label=y, group=get_groups(dates))
+def train_model(X, y, dates, n_rounds, weights=None):
+    dtrain = lgb.Dataset(X, label=y, weight=weights, group=get_groups(dates))
     return lgb.train(BASE_PARAMS, dtrain, num_boost_round=n_rounds)
 
 
@@ -263,13 +268,15 @@ if __name__ == '__main__':
 
         X_tr = np.nan_to_num(f_train[feature_cols].values, nan=0, posinf=0, neginf=0)
         y_tr = f_train['relevance'].values
+        w_tr = f_train['sample_weight'].values
         X_v = np.nan_to_num(f_val[feature_cols].values, nan=0, posinf=0, neginf=0)
         y_v_rel = f_val['relevance'].values
+        w_v = f_val['sample_weight'].values
         y_v_cont = f_val['label'].values
         val_dt = f_val['日期'].values
 
         model = train_fold(X_tr, y_tr, f_train['日期'].values,
-                           X_v, y_v_rel, val_dt, n_rounds=3000)
+                           X_v, y_v_rel, val_dt, w_tr, w_v, n_rounds=3000)
 
         preds = model.predict(X_v)
         wr, m = eval_competition(preds, y_v_cont, val_dt)
@@ -291,7 +298,8 @@ if __name__ == '__main__':
     print(f"\n── Holdout evaluation ──")
     eval_model = train_model(
         np.nan_to_num(cv_df[feature_cols].values, nan=0, posinf=0, neginf=0),
-        cv_df['relevance'].values, cv_df['日期'].values, final_iter
+        cv_df['relevance'].values, cv_df['日期'].values, final_iter,
+        weights=cv_df['sample_weight'].values
     )
     X_ho = np.nan_to_num(holdout_df[feature_cols].values, nan=0, posinf=0, neginf=0)
     ho_preds = eval_model.predict(X_ho)
@@ -302,7 +310,8 @@ if __name__ == '__main__':
     # ── Retrain on ALL data for submission ──
     print(f"\n── Retrain on ALL data ({final_iter} rounds) ──")
     X_all = np.nan_to_num(df[feature_cols].values, nan=0, posinf=0, neginf=0)
-    final_model = train_model(X_all, df['relevance'].values, df['日期'].values, final_iter)
+    final_model = train_model(X_all, df['relevance'].values, df['日期'].values,
+                              final_iter, weights=df['sample_weight'].values)
 
     # ── Save ──
     final_model.save_model(os.path.join(MODEL_DIR, 'best.txt'))
@@ -313,7 +322,7 @@ if __name__ == '__main__':
         'seed': SEED, 'objective': 'lambdarank',
         'n_jobs': 1, 'deterministic': True,
         'purge_days': PURGE_DAYS,
-        'relevance': '20-bin qcut per day',
+        'relevance': 'top5=5/4/3/2/1 rest=0, sample_weight ~60x for top5',
         'iter_selection': 'median',
         'holdout_months': 2,
         'cv_results': cv_results,

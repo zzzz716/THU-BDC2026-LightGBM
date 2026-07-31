@@ -43,7 +43,8 @@ def engineer_features_158plus39(df):
 
     # 5. 统一处理inf和NaN
     df_final.replace([np.inf, -np.inf], np.nan, inplace=True)
-    df_final.fillna(0, inplace=True)
+    df_final.ffill(inplace=True)  # forward-fill first (preserves history signal)
+    df_final.fillna(0, inplace=True)  # only initial rows with no history get 0
     
     return df_final
 
@@ -127,7 +128,8 @@ def engineer_features_39(df):
     # 处理 inf 和 -inf
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
 
-    # 填充 NaN 值（注意：这可能引入偏差，根据下游任务决定是否保留）
+    # 填充 NaN 值：先向前填充，再将初始无历史的行填0
+    df.ffill(inplace=True)
     df.fillna(0, inplace=True)
 
     return df
@@ -182,9 +184,9 @@ def engineer_features(df):
 
     windows = [5, 10, 20, 30, 60]
 
-    # 3. Price change features (5 features) - 向量化操作，无需更改
+    # 3. Price change features (5 features)
     for w in windows:
-        features.append(close.shift(w) / (close + 1e-12))
+        features.append((close / close.shift(w)) - 1)  # ROC = (current/past) - 1
         feature_names.append(f'ROC{w}')
 
     # 4. Moving average features (5 features) - 使用 talib 加速
@@ -260,17 +262,16 @@ def engineer_features(df):
         feature_names.append(f'IMXD{w}')
 
     # 12. Correlation features (10 features) - 使用 talib 加速
-    log_volume = np.log(volume + 1)
+    log_volume = np.log1p(volume)
     for w in windows:
         features.append(talib.CORREL(close, log_volume, timeperiod=w))
         feature_names.append(f'CORR{w}')
     
     close_ret = close / close.shift(1)
-    volume_ret = volume / (volume.shift(1) + 1e-12)
-    log_volume_ret = np.log(volume_ret + 1)
+    log_volume_ret = np.log1p(volume).diff()  # log1p(vol_t) - log1p(vol_{t-1})
     for w in windows:
-        # talib.CORREL 需要 Series，且不能有 NaN
-        corr_df = pd.concat([close_ret, log_volume_ret], axis=1).fillna(0)
+        # talib.CORREL needs Series without NaN; ffill then fill remaining with 0
+        corr_df = pd.concat([close_ret, log_volume_ret], axis=1).ffill().fillna(0)
         features.append(talib.CORREL(corr_df.iloc[:, 0], corr_df.iloc[:, 1], timeperiod=w))
         feature_names.append(f'CORD{w}')
 
@@ -356,6 +357,7 @@ def engineer_features(df):
     
     # 填充缺失值
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    df.ffill(inplace=True)
     df.fillna(0, inplace=True)
     return df
 def process_single_stock(stock_row, data, features, sequence_length, date):
